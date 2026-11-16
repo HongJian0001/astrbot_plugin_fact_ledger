@@ -102,6 +102,144 @@ class FactLedger(Star):
         self._apply_config_values(self._applied, record=False)
         self._push_config()
 
+    # ---------------- 配置页双向同步 ----------------
+
+    def _warn_once(self, message: str) -> None:
+        if message in self._warned:
+            return
+        self._warned.add(message)
+        logger.warning(f"{LOG} {message}")
+
+    def _save(self) -> None:
+        """落盘台账并把最新值回写到插件配置页。"""
+        ledger.save_ledger(self.ledger_path, self._data)
+        self._push_config()
+
+    def _config_values(self) -> dict[str, Any]:
+        values: dict[str, Any] = {}
+        for key, _metric, _field, _kind in CONFIG_FIELDS:
+            try:
+                values[key] = self.config.get(key)
+            except Exception:
+                values[key] = getattr(self.config, key, None)
+        return values
+
+    def _read_config_file(self) -> dict[str, Any]:
+        try:
+            with open(self._config_path, "r", encoding="utf-8-sig") as handle:
+                raw = json.load(handle)
+        except Exception:
+            return {}
+        if not isinstance(raw, dict):
+            return {}
+        return {key: raw.get(key) for key, _m, _f, _k in CONFIG_FIELDS if key in raw}
+
+    def _config_file_mtime(self) -> float:
+        try:
+            return os.path.getmtime(self._config_path)
+        except OSError:
+            return 0.0
+
+    def _apply_config_values(self, values: dict[str, Any], *, record: bool) -> None:
+        metrics = self._data.get("metrics") or {}
+        dirty = False
+        for cfg_key, metric_key, field, kind in CONFIG_FIELDS:
+            if cfg_key not in values:
+                continue
+            metric = metrics.get(metric_key)
+            if not metric:
+                continue
+            raw = values.get(cfg_key)
+            if raw is None or raw == "":
+                continue
+            try:
+                new_value: Any = float(raw) if kind == "float" else str(raw).strip()
+            except (TypeError, ValueError):
+                continue
+            old_value = metric.get(field)
+            if field == "target":
+                if old_value is not None and float(old_value) == float(new_value):
+                    continue
+                if ledger.target_error(metric, float(new_value)):
+                    continue
+                ledger.set_target(metric, float(new_value), reason="配置页修改")
+                dirty = True
+                continue
+            if field == "value" and record:
+                entry = (
+                    ledger.set_value(metric, float(new_value), reason="配置页修改", evidence="插件配置页")
+                    if kind == "float"
+                    else ledger.set_text(metric, str(new_value), reason="配置页修改", evidence="插件配置页")
+                )
+                if entry:
+                    dirty = True
+                continue
+            if old_value != new_value:
+                if field == "value":
+                    metric["prev"] = old_value
+                    metric["updated_at"] = ledger.now_local().isoformat(timespec="seconds")
+                metric[field] = new_value
+                dirty = True
+        if dirty:
+            ledger.save_ledger(self.ledger_path, self._data)
+
+    def _push_config(self) -> None:
+        """把台账最新值写回配置页（直接改配置文件，避免内存副本过期覆盖用户编辑）。"""
+        metrics = self._data.get("metrics") or {}
+        current: dict[str, Any] = {}
+        try:
+            if os.path.exists(self._config_path):
+                with open(self._config_path, "r", encoding="utf-8-sig") as handle:
+                    loaded = json.load(handle)
+                if isinstance(loaded, dict):
+                    current = loaded
+        except Exception:
+            current = {}
+        changed = False
+        for cfg_key, metric_key, field, _kind in CONFIG_FIELDS:
+            metric = metrics.get(metric_key)
+            if not metric:
+                continue
+            value = metric.get(field)
+            if value is None:
+                continue
+            if current.get(cfg_key) != value:
+                current[cfg_key] = value
+                changed = True
+        if not changed:
+            self._applied = {key: current.get(key) for key, *_ in CONFIG_FIELDS}
+            return
+        tmp = f"{self._config_path}.tmp"
+        try:
+            with open(tmp, "w", encoding="utf-8") as handle:
+                json.dump(current, handle, ensure_ascii=False, indent=2)
+            os.replace(tmp, self._config_path)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(f"{LOG} 配置回写失败: {exc}")
+            return
+        try:
+            for key in current:
+                self.config[key] = current[key]
+        except Exception:
+            pass
+        self._config_mtime = self._config_file_mtime()
+        self._applied = {key: current.get(key) for key, *_ in CONFIG_FIELDS}
+
+    def _maybe_reload_config(self) -> None:
+        mtime = self._config_file_mtime()
+        if not mtime or mtime == self._config_mtime:
+            return
+        self._config_mtime = mtime
+        values = self._read_config_file()
+        if not values:
+            return
+        diff = {key: value for key, value in values.items() if self._applied.get(key) != value}
+        if not diff:
+            self._applied.update(values)
+            return
+        self._apply_config_values(diff, record=True)
+        self._applied = self._config_values()
+
     # ---------------- 基础 ----------------
 
     def _cfg(self, key: str, default: Any = None) -> Any:

@@ -13,7 +13,7 @@ desc: |
   - 配置页双向同步，21 个字段可直接查看和修改
   - 可选回写记忆插件，把最新值覆盖成唯一一条核心事实
 help: 发送 /台账 查看；/台账 加 ... 新增指标；/台账 详情 <key> 看变化与证据
-version: 0.1.0
+version: 0.1.1
 author: 君莫笑
 repo: https://github.com/HongJian0001/astrbot_plugin_fact_ledger
 astrbot_version: ">=4.16,<5"

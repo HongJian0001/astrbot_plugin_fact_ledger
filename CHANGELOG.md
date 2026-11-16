@@ -1,5 +1,11 @@
 # 更新日志
 
+## 0.1.1（2026-11-16）
+
+修复：
+- 补回被误删的配置同步方法（`_config_values` 等 8 个），修复插件加载报错
+  `'FactLedger' object has no attribute '_config_values'`
+
 ## 0.1.0（2026-11-16）
 
 首个版本。
