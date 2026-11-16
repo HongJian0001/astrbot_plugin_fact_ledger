@@ -1,0 +1,291 @@
+{
+  "enabled": {
+    "description": "启用台账",
+    "hint": "关闭后不注入、不自动推进，数据保留。",
+    "type": "bool",
+    "default": true
+  },
+  "inject_enabled": {
+    "description": "注入当前状态",
+    "hint": "每轮把指标当前值塞进上下文，模型回答时以它为准。",
+    "type": "bool",
+    "default": true
+  },
+  "inject_max_metrics": {
+    "description": "最多注入几个指标",
+    "hint": "按 priority 排序取前 N 个，避免挤占上下文。",
+    "type": "int",
+    "default": 3,
+    "slider": {
+      "min": 1,
+      "max": 10,
+      "step": 1
+    }
+  },
+  "inject_max_chars": {
+    "description": "注入字数上限",
+    "type": "int",
+    "default": 600,
+    "slider": {
+      "min": 200,
+      "max": 2000,
+      "step": 50
+    }
+  },
+  "auto_advance_enabled": {
+    "description": "自动推进",
+    "hint": "到 cadence（如 daily@15:00）时，由系统按规则推进数值，不依赖模型。",
+    "type": "bool",
+    "default": true
+  },
+  "history_max_entries": {
+    "description": "每个指标保留多少条变化记录",
+    "hint": "记录含原因与证据，用于回答「为什么是这个数」。",
+    "type": "int",
+    "default": 30,
+    "slider": {
+      "min": 5,
+      "max": 200,
+      "step": 5
+    }
+  },
+  "admin_users": {
+    "description": "可修改台账的用户",
+    "hint": "QQ 号，逗号分隔。留空则使用 AstrBot 全局管理员列表。",
+    "type": "string",
+    "default": ""
+  },
+  "memory_sync_enabled": {
+    "description": "回写记忆（事实同步）",
+    "hint": "指标变化后，把最新值 upsert 成记忆插件里唯一一条核心事实块，覆盖旧值，不新增。",
+    "type": "bool",
+    "default": true
+  },
+  "memory_sync_metrics": {
+    "description": "要回写的指标",
+    "hint": "逗号分隔的 key，例如 weight_jin。留空则不同步。",
+    "type": "string",
+    "default": ""
+  },
+  "memory_sync_target_id": {
+    "description": "记忆归属用户",
+    "hint": "回写到谁的私有作用域（QQ 号）。留空则不同步。",
+    "type": "string",
+    "default": ""
+  },
+  "memory_sync_bot_id": {
+    "description": "机器人 QQ",
+    "hint": "记忆里的 bot_id，留空用 self。",
+    "type": "string",
+    "default": ""
+  },
+  "memory_sync_persona_id": {
+    "description": "人设 ID（可留空）",
+    "type": "string",
+    "default": ""
+  },
+  "require_confirm": {
+    "description": "执行前需确认",
+    "hint": "开启后，到点只提示「待确认」，不自动改数值；等模型确认（如「我去称了」）才真正推进。",
+    "type": "bool",
+    "default": true
+  },
+  "timezone": {
+    "description": "时区",
+    "hint": "定时推进按这个时区判断「今天到点没有」，例如 Asia/Shanghai。",
+    "type": "string",
+    "default": "Asia/Shanghai"
+  },
+  "appearance_skin_tone": {
+    "description": "【身份卡】肤色",
+    "hint": "固定外貌，与人设保持一致",
+    "type": "string",
+    "default": ""
+  },
+  "appearance_hair": {
+    "description": "【身份卡】发型",
+    "hint": "",
+    "type": "string",
+    "default": ""
+  },
+  "appearance_eyes": {
+    "description": "【身份卡】瞳色",
+    "hint": "",
+    "type": "string",
+    "default": ""
+  },
+  "appearance_facial": {
+    "description": "【身份卡】五官",
+    "hint": "",
+    "type": "string",
+    "default": ""
+  },
+  "appearance_marks": {
+    "description": "【身份卡】特殊体征",
+    "hint": "",
+    "type": "string",
+    "default": ""
+  },
+  "appearance_expression": {
+    "description": "【身份卡】常用表情",
+    "hint": "",
+    "type": "string",
+    "default": ""
+  },
+  "body_weight": {
+    "description": "【可变】当前体重（斤）",
+    "hint": "改动会记一条带原因的记录",
+    "type": "float",
+    "default": 0,
+    "slider": {
+      "min": 30,
+      "max": 300,
+      "step": 0.1
+    }
+  },
+  "body_target": {
+    "description": "【可变】目标体重（斤）",
+    "hint": "必须小于当前体重",
+    "type": "float",
+    "default": 0,
+    "slider": {
+      "min": 30,
+      "max": 300,
+      "step": 0.1
+    }
+  },
+  "body_deadline": {
+    "description": "【可变】目标截止日期",
+    "hint": "格式 YYYY-MM-DD，留空表示不设",
+    "type": "string",
+    "default": ""
+  },
+  "body_height": {
+    "description": "【可变】身高（cm）",
+    "hint": "",
+    "type": "float",
+    "default": 0,
+    "slider": {
+      "min": 100,
+      "max": 250,
+      "step": 1
+    }
+  },
+  "body_bust": {
+    "description": "【私密】胸围（cm）",
+    "hint": "只在主人私聊提问时回答",
+    "type": "float",
+    "default": 0,
+    "slider": {
+      "min": 50,
+      "max": 150,
+      "step": 1
+    }
+  },
+  "body_waist": {
+    "description": "【私密】腰围（cm）",
+    "hint": "",
+    "type": "float",
+    "default": 0,
+    "slider": {
+      "min": 40,
+      "max": 150,
+      "step": 1
+    }
+  },
+  "body_hip": {
+    "description": "【私密】臀围（cm）",
+    "hint": "",
+    "type": "float",
+    "default": 0,
+    "slider": {
+      "min": 50,
+      "max": 160,
+      "step": 1
+    }
+  },
+  "body_cup": {
+    "description": "【私密】罩杯",
+    "hint": "旧记录 B 已作废",
+    "type": "string",
+    "default": ""
+  },
+  "rule_step": {
+    "description": "【规则】每次变化幅度（斤）",
+    "hint": "成功减重那天掉多少",
+    "type": "float",
+    "default": 0.4,
+    "slider": {
+      "min": 0.1,
+      "max": 3.0,
+      "step": 0.1
+    }
+  },
+  "rule_floor": {
+    "description": "【规则】下限（斤）",
+    "hint": "不会低于这个值",
+    "type": "float",
+    "default": 0,
+    "slider": {
+      "min": 30,
+      "max": 200,
+      "step": 0.5
+    }
+  },
+  "rule_ceiling": {
+    "description": "【规则】上限（斤）",
+    "hint": "不会高于这个值",
+    "type": "float",
+    "default": 200,
+    "slider": {
+      "min": 30,
+      "max": 300,
+      "step": 0.5
+    }
+  },
+  "rule_flat_probability": {
+    "description": "【规则】持平概率",
+    "hint": "0~1，例如 0.25 = 25% 的天数不掉秤",
+    "type": "float",
+    "default": 0.25,
+    "slider": {
+      "min": 0,
+      "max": 1,
+      "step": 0.01
+    }
+  },
+  "rule_gain_probability": {
+    "description": "【规则】略涨概率",
+    "hint": "0~1，会与持平概率自动协调不超过 1",
+    "type": "float",
+    "default": 0.12,
+    "slider": {
+      "min": 0,
+      "max": 1,
+      "step": 0.01
+    }
+  },
+  "rule_gain_step": {
+    "description": "【规则】略涨幅度（斤）",
+    "hint": "",
+    "type": "float",
+    "default": 0.2,
+    "slider": {
+      "min": 0,
+      "max": 2,
+      "step": 0.05
+    }
+  },
+  "rule_cadence": {
+    "description": "【规则】推进节奏",
+    "hint": "格式 daily@HH:MM",
+    "type": "string",
+    "default": "daily@15:00"
+  },
+  "seed_demo": {
+    "description": "首次安装创建示例指标",
+    "hint": "台账为空时自动加一个「示例·读书进度」，方便先看到效果；不需要可关掉并删掉该指标。",
+    "type": "bool",
+    "default": true
+  }
+}
