@@ -986,6 +986,36 @@ class FactLedger(Star):
         self._save_proposals(data)
         return proposal
 
+    @filter.llm_tool(name="fact_ledger_set_frequency")
+    async def tool_set_frequency(self, event: AstrMessageEvent, key: str, frequency: str, reason: str = "") -> str:
+        """主人**明确要求**改练习频率时，直接改，不需要再走提案。
+
+        只有主人私聊直接说「改成每周五次」这类指令时才用这个；
+        如果是她自己想改，必须用 fact_task_propose_frequency 提提案。
+
+        Args:
+            key (string): 技能指标键名，例如 skill_highheels。
+            frequency (string): 新频率，自由文本，例如「每周五次」。
+            reason (string): 原因，例如「主人让我练勤一点」。
+        """
+        if not self._can_read_private(event):
+            return "这个只能由主人私聊我时做。"
+        metric = (self._data.get("metrics") or {}).get(str(key or "").strip())
+        if not metric:
+            return f"没有名为 {key} 的技能。"
+        if str(metric.get("rule")) != "skill":
+            return f"{metric.get('label')} 不是技能指标。"
+        frequency = str(frequency or "").strip()
+        if not frequency:
+            return "新的频率不能为空。"
+        async with self._lock:
+            record = ledger.set_frequency(metric, frequency, reason=reason or "主人直接指定")
+            if record:
+                self._save()
+        if not record:
+            return f"「{metric.get('label')}」的频率本来就是「{frequency}」。"
+        return f"已改：{metric.get('label')} 的练习频率 {record['from'] or '（未设）'} → {record['to']}。"
+
     @filter.llm_tool(name="fact_task_propose_frequency")
     async def tool_propose_frequency(self, event: AstrMessageEvent, key: str, frequency: str, reason: str = "") -> str:
         """提议修改某个技能的练习频率（需要主人同意后才生效）。
@@ -1153,6 +1183,9 @@ class FactLedger(Star):
         if sub == "驳回" and args:
             yield event.plain_result(self._reject_proposal(args[0]))
             return
+        if sub == "频率" and len(args) >= 2:
+            yield event.plain_result(await self._apply_frequency(args[0], " ".join(args[1:])))
+            return
         if sub == "目标" and len(args) >= 2:
             yield event.plain_result(await self._apply_target(args[0], args[1], args[2] if len(args) > 2 else ""))
             return
@@ -1171,12 +1204,30 @@ class FactLedger(Star):
                 "/台账 详情 <key>          看变化与证据\n"
                 "/台账 目标 <key> <数值> [YYYY-MM-DD]\n"
                 "/台账 练习 <key> [次数] [说明]\n"
+                "/台账 频率 <key> <自由文本>\n"
                 "/台账 提案 / 批准 [id] / 驳回 <id>\n"
                 "/台账 改 <key> <数值> [原因]\n"
                 "/台账 推进 <key> [原因]\n"
                 "/台账 加 <key> <名称> <单位> <初值> <目标> <规则> <步长> [daily@15:00]\n"
                 "/台账 删 <key>"
             )
+
+    async def _apply_frequency(self, key: str, frequency: str) -> str:
+        metric = (self._data.get("metrics") or {}).get(key)
+        if not metric:
+            return f"没有名为 {key} 的技能。"
+        if str(metric.get("rule")) != "skill":
+            return f"{metric.get('label')} 不是技能指标。"
+        frequency = str(frequency or "").strip()
+        if not frequency:
+            return "频率不能为空。"
+        async with self._lock:
+            record = ledger.set_frequency(metric, frequency, reason="管理员指令修改")
+            if record:
+                self._save()
+        if not record:
+            return f"「{metric.get('label')}」的频率本来就是「{frequency}」。"
+        return f"已改：{metric.get('label')} 的练习频率 {record['from'] or '（未设）'} → {record['to']}。"
 
     async def _apply_practice(self, key: str, sessions: int, note: str) -> str:
         metric = (self._data.get("metrics") or {}).get(key)
