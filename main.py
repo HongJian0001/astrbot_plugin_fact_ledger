@@ -1320,7 +1320,7 @@ class FactLedger(Star):
             for idx, (upper, _name) in enumerate(levels):
                 if value <= upper:
                     if idx + 1 < len(levels):
-                        nxt = (levels[idx + 1][1], levels[idx + 1][0])
+                        nxt = (levels[idx + 1][0], levels[idx + 1][1])  # (上限, 名称)
                     break
             if nxt:
                 lines.append(f"  距「{nxt[1]}」还差 {nxt[0] - value:g} 点")
