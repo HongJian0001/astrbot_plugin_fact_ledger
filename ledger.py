@@ -89,6 +89,7 @@ def normalize_metric(raw: dict[str, Any]) -> dict[str, Any]:
     metric["decimals"] = max(0, min(3, _int(metric.get("decimals"), 1)))
     metric["cadence"] = str(metric.get("cadence") or "").strip()
     metric["frequency_hint"] = str(metric.get("frequency_hint") or "").strip()
+    metric["frequency_history"] = [item for item in (metric.get("frequency_history") or []) if isinstance(item, dict)]
     metric["priority"] = _int(metric.get("priority"), 50)
     metric["inject"] = bool(metric.get("inject", True))
     metric["enabled"] = bool(metric.get("enabled", True))
@@ -409,6 +410,33 @@ def target_error(metric: dict[str, Any], target: float | None) -> str:
     if rule == "increase" and ceiling is not None and float(target) > float(ceiling):
         return f"目标高于上限 {float(ceiling):g}，请先把上限调高"
     return ""
+
+
+def set_frequency(
+    metric: dict[str, Any],
+    text: str,
+    now: datetime | None = None,
+    *,
+    reason: str = "",
+    max_history: int = 10,
+) -> dict[str, Any] | None:
+    """改「频率参考」文案（自由文本，不打卡）。"""
+    now = now or now_local()
+    old = str(metric.get("frequency_hint") or "")
+    new = str(text or "").strip()
+    if not new or new == old:
+        return None
+    metric["frequency_hint"] = new
+    record = {
+        "at": now.isoformat(timespec="seconds"),
+        "from": old,
+        "to": new,
+        "reason": str(reason or "").strip() or "频率调整",
+    }
+    history = list(metric.get("frequency_history") or [])
+    history.append(record)
+    metric["frequency_history"] = history[-max(1, max_history):]
+    return record
 
 
 def set_target(

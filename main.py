@@ -959,6 +959,65 @@ class FactLedger(Star):
             f"哥哥同意的话回我「同意」，或者说 /台账 批准 {proposal['id']}。"
         )
 
+    def _proposal_quota_error(self) -> str:
+        pending = self._pending_proposals()
+        if len(pending) >= 3:
+            return "待批准的提案已经有 3 个了，先处理一下再加。"
+        today = ledger.now_local().date().isoformat()
+        created_today = sum(
+            1 for item in self._load_proposals().get("items") or []
+            if str(item.get("created_at") or "")[:10] == today
+        )
+        if created_today >= 2:
+            return "今天已经提了 2 个提案了，明天再说吧。"
+        return ""
+
+    def _new_proposal(self, ptype: str, payload: dict[str, Any]) -> dict[str, Any]:
+        proposal = {
+            "id": "p_" + uuid.uuid4().hex[:8],
+            "type": ptype,
+            "status": "pending",
+            "created_at": ledger.now_local().isoformat(timespec="seconds"),
+            "expires_at": (ledger.now_local() + ledger.timedelta(days=7)).isoformat(timespec="seconds"),
+            "payload": payload,
+        }
+        data = self._load_proposals()
+        data["items"].append(proposal)
+        self._save_proposals(data)
+        return proposal
+
+    @filter.llm_tool(name="fact_task_propose_frequency")
+    async def tool_propose_frequency(self, event: AstrMessageEvent, key: str, frequency: str, reason: str = "") -> str:
+        """提议修改某个技能的练习频率（需要主人同意后才生效）。
+
+        Args:
+            key (string): 技能指标键名，例如 skill_highheels。
+            frequency (string): 新的频率参考，自由文本，例如「每周三次」。
+            reason (string): 为什么想改。
+        """
+        if not self._can_read_private(event):
+            return "这个只能由主人私聊我时做。"
+        metric = (self._data.get("metrics") or {}).get(str(key or "").strip())
+        if not metric:
+            return f"没有名为 {key} 的技能。"
+        if str(metric.get("rule")) != "skill":
+            return f"{metric.get('label')} 不是技能指标。"
+        frequency = str(frequency or "").strip()
+        if not frequency:
+            return "新的频率不能为空。"
+        error = self._proposal_quota_error()
+        if error:
+            return error
+        proposal = self._new_proposal("skill_frequency", {
+            "key": str(key).strip(),
+            "frequency": frequency,
+            "reason": str(reason or ""),
+        })
+        return (
+            f"已生成提案 {proposal['id']}：把「{metric.get('label')}」的练习频率改成「{frequency}」。"
+            f"哥哥同意的话回我「同意」，或者说 /台账 批准 {proposal['id']}。"
+        )
+
     @filter.llm_tool(name="fact_task_approve")
     async def tool_approve(self, event: AstrMessageEvent, proposal_id: str = "") -> str:
         """主人同意后，把待批准的提案转成正式技能指标。
@@ -996,7 +1055,27 @@ class FactLedger(Star):
         else:
             target = sorted(pending, key=lambda item: str(item.get("created_at") or ""))[-1]
         payload = target.get("payload") or {}
+        ptype = str(target.get("type") or "skill")
         key = str(payload.get("key") or "").strip()
+        if ptype == "skill_frequency":
+            metric = (self._data.get("metrics") or {}).get(key)
+            if not metric:
+                return f"找不到技能 {key}。"
+            frequency = str(payload.get("frequency") or "").strip()
+            async with self._lock:
+                record = ledger.set_frequency(
+                    metric, frequency, reason=str(payload.get("reason") or "提案调整")
+                )
+                if record:
+                    self._save()
+            data = self._load_proposals()
+            for item in data.get("items") or []:
+                if item.get("id") == target.get("id"):
+                    item["status"] = "approved"
+            self._save_proposals(data)
+            if not record:
+                return f"「{metric.get('label')}」的频率本来就是「{frequency}」。"
+            return f"已批准：「{metric.get('label')}」的练习频率改成「{frequency}」。"
         label = str(payload.get("label") or "").strip()
         if not key or not label:
             return "这条提案内容不完整，已忽略。"
@@ -1131,7 +1210,10 @@ class FactLedger(Star):
         lines = ["📋 待批准的提案"]
         for item in pending:
             payload = item.get("payload") or {}
-            lines.append(f"· {item['id']}：{payload.get('label')}（{payload.get('key')}）")
+            if str(item.get("type")) == "skill_frequency":
+                lines.append(f"· {item['id']}：把「{payload.get('key')}」的频率改成「{payload.get('frequency')}」")
+            else:
+                lines.append(f"· {item['id']}：{payload.get('label')}（{payload.get('key')}）")
             if payload.get("frequency"):
                 lines.append(f"   频率参考：{payload['frequency']}（不打卡）")
             if payload.get("reason"):
