@@ -671,25 +671,6 @@ class FactLedger(Star):
                 hint += f"，执行后约 {ledger.fmt(metric, expected)}（可能持平或略涨，按实际结果说）"
             hint += f"。如果这轮要报数，先调用 fact_ledger_confirm('{key}')，再按它返回的值说。"
             lines.append(hint)
-        today = now.date().isoformat()
-        for key, metric in (self._data.get("metrics") or {}).items():
-            if str(metric.get("rule") or "") != "skill":
-                continue
-            sched = ledger.parse_schedule(metric.get("cadence", ""))
-            if sched is None:
-                continue
-            if sched["kind"] == "weekly" and sched.get("dow") and now.isoweekday() != sched["dow"]:
-                continue
-            if str(metric.get("last_practice_on") or "") == today:
-                continue
-            if (now.hour, now.minute) < (sched["hour"], sched["minute"]):
-                continue
-            found = True
-            level, _lo, _hi = ledger.skill_level(metric)
-            lines.append(
-                f"- 技能 {metric.get('label')}（{key}）：今天还没练，当前 {ledger.fmt(metric)}/100（{level}）。"
-                f"可以提醒哥哥练一次；他说练了就调用 fact_ledger_practice('{key}')。"
-            )
         if not found:
             return ""
         lines.append("</fact_ledger_pending>")
@@ -934,13 +915,13 @@ class FactLedger(Star):
         return text
 
     @filter.llm_tool(name="fact_task_propose")
-    async def tool_propose(self, event: AstrMessageEvent, key: str, label: str, cadence: str = "", reason: str = "") -> str:
+    async def tool_propose(self, event: AstrMessageEvent, key: str, label: str, frequency: str = "", reason: str = "") -> str:
         """向主人提一个新的技能任务（需要主人同意后才生效）。
 
         Args:
             key (string): 英文键名，例如 skill_highheels。
             label (string): 技能名称，例如 穿高跟鞋走路。
-            cadence (string): 提醒节奏，例如 weekly@3,20:00；留空表示不提醒。
+            frequency (string): 频率参考，自由文本，例如「每周两三次」；留空表示不设。
             reason (string): 为什么想加这个任务。
         """
         if not self._can_read_private(event):
@@ -968,7 +949,7 @@ class FactLedger(Star):
             "status": "pending",
             "created_at": ledger.now_local().isoformat(timespec="seconds"),
             "expires_at": (ledger.now_local() + ledger.timedelta(days=7)).isoformat(timespec="seconds"),
-            "payload": {"key": key, "label": label, "cadence": str(cadence or "").strip(), "reason": str(reason or "")},
+            "payload": {"key": key, "label": label, "frequency": str(frequency or "").strip(), "reason": str(reason or "")},
         }
         data = self._load_proposals()
         data["items"].append(proposal)
@@ -999,7 +980,7 @@ class FactLedger(Star):
             return "现在没有待批准的提案。"
         return "\n".join(
             f"- {item['id']}：{item['payload'].get('label')}（{item['payload'].get('key')}）"
-            + (f"，提醒 {item['payload'].get('cadence')}" if item['payload'].get("cadence") else "")
+            + (f"，频率 {item['payload'].get('frequency')}" if item['payload'].get("frequency") else "")
             for item in pending
         )
 
@@ -1023,7 +1004,8 @@ class FactLedger(Star):
             return f"台账里已经有 {key} 了。"
         metric = ledger.new_metric(
             key, label, unit="", value=0, target=100, rule="skill",
-            cadence=str(payload.get("cadence") or ""), decimals=0, priority=70,
+            cadence="", decimals=0, priority=70,
+            frequency_hint=str(payload.get("frequency") or ""),
         )
         metric["last_practice_on"] = ""
         async with self._lock:
@@ -1150,8 +1132,8 @@ class FactLedger(Star):
         for item in pending:
             payload = item.get("payload") or {}
             lines.append(f"· {item['id']}：{payload.get('label')}（{payload.get('key')}）")
-            if payload.get("cadence"):
-                lines.append(f"   提醒：{payload['cadence']}")
+            if payload.get("frequency"):
+                lines.append(f"   频率参考：{payload['frequency']}（不打卡）")
             if payload.get("reason"):
                 lines.append(f"   理由：{payload['reason']}")
         lines.append("同意用 /台账 批准 <id>，不要用 /台账 驳回 <id>。")
@@ -1221,9 +1203,9 @@ class FactLedger(Star):
                     lines.append(f"  上次练习：{last}")
             else:
                 lines.append("  上次练习：还没开始")
-            cadence = self._format_cadence(item.get("cadence") or "")
-            if cadence:
-                lines.append(f"  节奏：{cadence}")
+            hint = str(item.get("frequency_hint") or "").strip()
+            if hint:
+                lines.append(f"  频率参考：{hint}（不打卡）")
             cap = float(item.get("daily_cap") or 8)
             gained = float(item.get("today_gain") or 0)
             lines.append(f"  每日上限：{cap:g} 点（今天已得 {gained:g}）")
@@ -1376,7 +1358,9 @@ class FactLedger(Star):
             return f"指标 {key} 已存在。"
         self._data.setdefault("metrics", {})[key] = ledger.new_metric(
             key, label, unit=unit, value=value, target=target,
-            rule=rule, step=step, cadence=cadence,
+            rule=rule, step=step,
+            cadence="" if rule == "skill" else cadence,
+            frequency_hint=cadence if rule == "skill" else "",
         )
         self._save()
         return f"已新增指标「{label}」（{key}），当前 {ledger.fmt(self._data['metrics'][key])}。"

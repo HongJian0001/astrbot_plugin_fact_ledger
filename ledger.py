@@ -88,6 +88,7 @@ def normalize_metric(raw: dict[str, Any]) -> dict[str, Any]:
     metric["ceiling"] = _num(metric.get("ceiling"), None)
     metric["decimals"] = max(0, min(3, _int(metric.get("decimals"), 1)))
     metric["cadence"] = str(metric.get("cadence") or "").strip()
+    metric["frequency_hint"] = str(metric.get("frequency_hint") or "").strip()
     metric["priority"] = _int(metric.get("priority"), 50)
     metric["inject"] = bool(metric.get("inject", True))
     metric["enabled"] = bool(metric.get("enabled", True))
@@ -604,6 +605,8 @@ def describe(metric: dict[str, Any]) -> str:
     if str(metric.get("rule") or "") == "skill":
         level, _lo, _hi = skill_level(metric)
         parts.append(f"等级 {level}")
+        if metric.get("frequency_hint"):
+            parts.append(f"频率参考 {metric['frequency_hint']}")
         if metric.get("practice_count"):
             parts.append(f"已练 {metric['practice_count']} 次")
     if metric.get("updated_at"):
@@ -708,6 +711,7 @@ def new_metric(
     cadence: str = "",
     decimals: int = 1,
     priority: int = 50,
+    frequency_hint: str = "",
 ) -> dict[str, Any]:
     return normalize_metric({
         "key": key,
@@ -718,6 +722,7 @@ def new_metric(
         "rule": rule,
         "step": step,
         "cadence": cadence,
+        "frequency_hint": frequency_hint,
         "decimals": decimals,
         "priority": priority,
         "inject": True,
