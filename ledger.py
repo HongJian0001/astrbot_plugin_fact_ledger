@@ -706,9 +706,23 @@ def build_injection(metrics: dict[str, Any], *, max_metrics: int = 3, max_chars:
     for item in items[: max(1, int(max_metrics))]:
         if str(item.get("rule") or "") == "skill":
             level, _lo, _hi = skill_level(item)
+            extra = f"已练 {item.get('practice_count') or 0} 次"
+            last = str(item.get("last_practice_on") or "")
+            if last:
+                try:
+                    days = (now_local().date() - datetime.fromisoformat(last).date()).days
+                    extra += f"，上次练是 {days} 天前" if days else "，上次练是今天"
+                except ValueError:
+                    extra += f"，上次练是 {last}"
+            else:
+                extra += "，还没开始练"
+            hint = str(item.get("frequency_hint") or "").strip()
+            if hint:
+                extra += f"，频率参考 {hint}"
             lines.append(
-                f"- 她正在练「{item.get('label')}」：熟练度 {fmt(item)}/100（{level}），已练 {item.get('practice_count') or 0} 次。"
-                f"涉及这件事时按当前水平说，不要说已经会了。"
+                f"- 她正在练「{item.get('label')}」：熟练度 {fmt(item)}/100（{level}），{extra}。"
+                f"涉及这件事时按当前水平说，不要说已经会了；"
+                f"如果按频率参考确实该练了，她可以主动提出去练，练完照常记一次。"
             )
             break
     has_private = any(
