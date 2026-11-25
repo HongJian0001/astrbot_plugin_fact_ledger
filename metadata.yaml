@@ -3,7 +3,7 @@ display_name: 成长台账
 short_desc: 体重、攒钱、技能熟练度等数值的状态机，带证据链，回答不瞎编
 desc: 把体重、攒钱、打卡、技能熟练度等可变数值做成带原因和证据的状态机。支持随机浮动、目标与截止日期、执行前确认；技能按练习次数累计熟练度，练到掌握为止。回答时以台账为准，不让模型编数字。机器人可以提议新任务，但需要主人同意后才生效。
 help: 发送 /台账 查看；/台账 加 ... 新增指标；/台账 练习 记录技能练习
-version: 0.2.2
+version: 0.2.3
 author: 君莫笑
 repo: https://github.com/HongJian0001/astrbot_plugin_fact_ledger
 astrbot_version: ">=4.16,<5"

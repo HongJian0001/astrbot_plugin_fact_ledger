@@ -1033,7 +1033,7 @@ class FactLedger(Star):
                 item["status"] = "approved"
         self._save_proposals(data)
         await self._write_skill_memory(key, metric, "approved")
-        return f"已批准：把「{label}」加进台账，当前熟练度 0/100（生疏）。以后你练了我就自动记上。"
+        return f"已批准：把「{label}」加进台账，当前熟练度 0/100（生疏）。以后我练了会自动记上。"
 
     # ---------------- 指令 ----------------
 
