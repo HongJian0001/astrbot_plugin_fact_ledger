@@ -15,6 +15,8 @@ import asyncio
 import json
 import os
 import sys
+import time
+import uuid
 from typing import Any, AsyncGenerator
 
 from astrbot.api import logger
@@ -101,6 +103,62 @@ class FactLedger(Star):
         self._applied = self._config_values()
         self._apply_config_values(self._applied, record=False)
         self._push_config()
+
+    # ---------------- 技能提案 / 衰减 ----------------
+
+    @property
+    def _proposals_path(self) -> str:
+        return os.path.join(os.path.dirname(self.ledger_path), "proposals.json")
+
+    def _load_proposals(self) -> dict[str, Any]:
+        try:
+            with open(self._proposals_path, "r", encoding="utf-8-sig") as handle:
+                raw = json.load(handle)
+        except Exception:
+            raw = {}
+        if not isinstance(raw, dict):
+            raw = {}
+        items = raw.get("items")
+        return {"version": 1, "items": items if isinstance(items, list) else []}
+
+    def _save_proposals(self, data: dict[str, Any]) -> None:
+        tmp = f"{self._proposals_path}.tmp"
+        with open(tmp, "w", encoding="utf-8") as handle:
+            json.dump(data, handle, ensure_ascii=False, indent=2)
+        os.replace(tmp, self._proposals_path)
+
+    def _pending_proposals(self) -> list[dict[str, Any]]:
+        data = self._load_proposals()
+        now = ledger.now_local()
+        alive: list[dict[str, Any]] = []
+        for item in data.get("items") or []:
+            if not isinstance(item, dict):
+                continue
+            if item.get("status") != "pending":
+                continue
+            try:
+                expired = ledger.datetime.fromisoformat(str(item.get("expires_at") or "")) < now
+            except Exception:
+                expired = False
+            if expired:
+                item["status"] = "expired"
+                continue
+            alive.append(item)
+        return alive
+
+    async def _apply_decay(self) -> list[dict[str, Any]]:
+        now = ledger.now_local()
+        changed: list[dict[str, Any]] = []
+        async with self._lock:
+            for key, metric in (self._data.get("metrics") or {}).items():
+                entry = ledger.decay_if_needed(metric, now, max_history=self._history_max)
+                if entry:
+                    changed.append({"key": key, **entry})
+            if changed:
+                self._save()
+        for item in changed:
+            logger.info(f"{LOG} {item['key']} 衰减 {item['from']} -> {item['to']}（{item.get('reason')}）")
+        return changed
 
     # ---------------- 配置页双向同步 ----------------
 
@@ -499,6 +557,23 @@ class FactLedger(Star):
                 hint += f"，执行后约 {ledger.fmt(metric, expected)}（可能持平或略涨，按实际结果说）"
             hint += f"。如果这轮要报数，先调用 fact_ledger_confirm('{key}')，再按它返回的值说。"
             lines.append(hint)
+        today = now.date().isoformat()
+        for key, metric in (self._data.get("metrics") or {}).items():
+            if str(metric.get("rule") or "") != "skill":
+                continue
+            slot = ledger.parse_cadence(metric.get("cadence", ""))
+            if slot is None:
+                continue
+            if str(metric.get("last_practice_on") or "") == today:
+                continue
+            if (now.hour, now.minute) < slot:
+                continue
+            found = True
+            level, _lo, _hi = ledger.skill_level(metric)
+            lines.append(
+                f"- 技能 {metric.get('label')}（{key}）：今天还没练，当前 {ledger.fmt(metric)}/100（{level}）。"
+                f"可以提醒哥哥练一次；他说练了就调用 fact_ledger_practice('{key}')。"
+            )
         if not found:
             return ""
         lines.append("</fact_ledger_pending>")
@@ -556,6 +631,7 @@ class FactLedger(Star):
             if not bool(self._cfg("enabled", True)) or not bool(self._cfg("inject_enabled", True)):
                 return
             self._maybe_reload_config()
+            await self._apply_decay()
             require_confirm = bool(self._cfg("require_confirm", True))
             if not require_confirm:
                 await self._advance_due()
@@ -724,6 +800,145 @@ class FactLedger(Star):
             text += f"（截止 {metric['deadline']}）"
         return text
 
+    @filter.llm_tool(name="fact_ledger_practice")
+    async def tool_practice(self, event: AstrMessageEvent, key: str, sessions: int = 1, note: str = "") -> str:
+        """记录一次技能练习，增加熟练度（按次数，受每日上限约束）。
+
+        Args:
+            key (string): 技能指标键名，例如 skill_highheels。
+            sessions (number): 练习次数，默认 1。
+            note (string): 练习说明，例如「穿高跟鞋走了半小时」。
+        """
+        if not self._can_read_private(event):
+            return "这个只能由主人私聊我时做。"
+        metric = (self._data.get("metrics") or {}).get(str(key or "").strip())
+        if not metric:
+            return f"没有名为 {key} 的技能。"
+        if str(metric.get("rule")) != "skill":
+            return f"{metric.get('label')} 不是技能指标，不能用练习。"
+        async with self._lock:
+            entry = ledger.practice(
+                metric,
+                sessions=sessions,
+                reason=note or f"练习 {sessions} 次",
+                evidence=f"{ledger.now_local():%Y-%m-%d %H:%M} 对话记录",
+                max_history=self._history_max,
+            )
+            if entry:
+                self._save()
+        if not entry:
+            level, _lo, _hi = ledger.skill_level(metric)
+            return f"{metric.get('label')} 本轮没有增加（可能今天练够了，或已经掌握）。当前 {ledger.fmt(metric)}，{level}。"
+        await self._sync_changed()
+        level, _lo, _hi = ledger.skill_level(metric)
+        return (
+            f"{metric.get('label')} 熟练度 {entry['from']} → {entry['to']}"
+            f"（+{entry['delta']}），当前等级 {level}，已练 {metric.get('practice_count')} 次。"
+        )
+
+    @filter.llm_tool(name="fact_task_propose")
+    async def tool_propose(self, event: AstrMessageEvent, key: str, label: str, cadence: str = "", reason: str = "") -> str:
+        """向主人提一个新的技能任务（需要主人同意后才生效）。
+
+        Args:
+            key (string): 英文键名，例如 skill_highheels。
+            label (string): 技能名称，例如 穿高跟鞋走路。
+            cadence (string): 提醒节奏，例如 weekly@3,20:00；留空表示不提醒。
+            reason (string): 为什么想加这个任务。
+        """
+        if not self._can_read_private(event):
+            return "这个只能由主人私聊我时做。"
+        import re as _re
+        key = str(key or "").strip()
+        label = str(label or "").strip()
+        if not _re.fullmatch(r"[a-z0-9_]{2,40}", key):
+            return "key 只能用 2~40 位小写字母、数字、下划线。"
+        if not label:
+            return "技能名称不能为空。"
+        if key in (self._data.get("metrics") or {}):
+            return f"台账里已经有 {key} 了。"
+        pending = self._pending_proposals()
+        if len(pending) >= 3:
+            return "待批准的提案已经有 3 个了，先处理一下再加。"
+        today = ledger.now_local().date().isoformat()
+        created_today = sum(1 for item in self._load_proposals().get("items") or []
+                            if str(item.get("created_at") or "")[:10] == today)
+        if created_today >= 2:
+            return "今天已经提了 2 个新任务了，明天再说吧。"
+        proposal = {
+            "id": "p_" + uuid.uuid4().hex[:8],
+            "type": "skill",
+            "status": "pending",
+            "created_at": ledger.now_local().isoformat(timespec="seconds"),
+            "expires_at": (ledger.now_local() + ledger.timedelta(days=7)).isoformat(timespec="seconds"),
+            "payload": {"key": key, "label": label, "cadence": str(cadence or "").strip(), "reason": str(reason or "")},
+        }
+        data = self._load_proposals()
+        data["items"].append(proposal)
+        self._save_proposals(data)
+        return (
+            f"已生成提案 {proposal['id']}：把「{label}」加进台账（目标 100，按次数累计）。"
+            f"哥哥同意的话回我「同意」，或者说 /台账 批准 {proposal['id']}。"
+        )
+
+    @filter.llm_tool(name="fact_task_approve")
+    async def tool_approve(self, event: AstrMessageEvent, proposal_id: str = "") -> str:
+        """主人同意后，把待批准的提案转成正式技能指标。
+
+        Args:
+            proposal_id (string): 提案 ID；留空表示批准最近的那一条。
+        """
+        if not self._can_read_private(event):
+            return "这个只能由主人私聊我时做。"
+        return await self._approve_proposal(proposal_id)
+
+    @filter.llm_tool(name="fact_task_list")
+    async def tool_task_list(self, event: AstrMessageEvent) -> str:
+        """列出待批准的技能提案。"""
+        if not self._can_read_private(event):
+            return "这个只能由主人私聊我时做。"
+        pending = self._pending_proposals()
+        if not pending:
+            return "现在没有待批准的提案。"
+        return "\n".join(
+            f"- {item['id']}：{item['payload'].get('label')}（{item['payload'].get('key')}）"
+            + (f"，提醒 {item['payload'].get('cadence')}" if item['payload'].get("cadence") else "")
+            for item in pending
+        )
+
+    async def _approve_proposal(self, proposal_id: str = "") -> str:
+        pending = self._pending_proposals()
+        if not pending:
+            return "没有待批准的提案。"
+        target = None
+        if proposal_id:
+            target = next((item for item in pending if item.get("id") == proposal_id), None)
+            if target is None:
+                return f"找不到待批准的提案 {proposal_id}。"
+        else:
+            target = sorted(pending, key=lambda item: str(item.get("created_at") or ""))[-1]
+        payload = target.get("payload") or {}
+        key = str(payload.get("key") or "").strip()
+        label = str(payload.get("label") or "").strip()
+        if not key or not label:
+            return "这条提案内容不完整，已忽略。"
+        if key in (self._data.get("metrics") or {}):
+            return f"台账里已经有 {key} 了。"
+        metric = ledger.new_metric(
+            key, label, unit="", value=0, target=100, rule="skill",
+            cadence=str(payload.get("cadence") or ""), decimals=0, priority=70,
+        )
+        metric["last_practice_on"] = ""
+        async with self._lock:
+            self._data.setdefault("metrics", {})[key] = metric
+            self._save()
+        data = self._load_proposals()
+        for item in data.get("items") or []:
+            if item.get("id") == target.get("id"):
+                item["status"] = "approved"
+        self._save_proposals(data)
+        return f"已批准：把「{label}」加进台账，当前熟练度 0/100（生疏）。说「练了一次」我就给你记上。"
+
     # ---------------- 指令 ----------------
 
     @filter.command("台账", alias={"成长台账"})
@@ -755,6 +970,24 @@ class FactLedger(Star):
             yield event.plain_result("只有管理员能改台账。查看用 /台账。")
             return
 
+        if sub == "练习" and args:
+            sessions = 1
+            if len(args) > 1:
+                try:
+                    sessions = max(1, int(args[1]))
+                except ValueError:
+                    sessions = 1
+            yield event.plain_result(await self._apply_practice(args[0], sessions, " ".join(args[2:])))
+            return
+        if sub == "提案":
+            yield event.plain_result(self._format_proposals())
+            return
+        if sub == "批准":
+            yield event.plain_result(await self._approve_proposal(args[0] if args else ""))
+            return
+        if sub == "驳回" and args:
+            yield event.plain_result(self._reject_proposal(args[0]))
+            return
         if sub == "目标" and len(args) >= 2:
             yield event.plain_result(await self._apply_target(args[0], args[1], args[2] if len(args) > 2 else ""))
             return
@@ -772,11 +1005,61 @@ class FactLedger(Star):
                 "/台账                     查看全部\n"
                 "/台账 详情 <key>          看变化与证据\n"
                 "/台账 目标 <key> <数值> [YYYY-MM-DD]\n"
+                "/台账 练习 <key> [次数] [说明]\n"
+                "/台账 提案 / 批准 [id] / 驳回 <id>\n"
                 "/台账 改 <key> <数值> [原因]\n"
                 "/台账 推进 <key> [原因]\n"
                 "/台账 加 <key> <名称> <单位> <初值> <目标> <规则> <步长> [daily@15:00]\n"
                 "/台账 删 <key>"
             )
+
+    async def _apply_practice(self, key: str, sessions: int, note: str) -> str:
+        metric = (self._data.get("metrics") or {}).get(key)
+        if not metric:
+            return f"没有名为 {key} 的技能。"
+        if str(metric.get("rule")) != "skill":
+            return f"{metric.get('label')} 不是技能指标。"
+        async with self._lock:
+            entry = ledger.practice(
+                metric, sessions=sessions,
+                reason=note or f"练习 {sessions} 次",
+                evidence=f"{ledger.now_local():%Y-%m-%d %H:%M} 指令 /台账 练习",
+                max_history=self._history_max,
+            )
+            if entry:
+                self._save()
+        if not entry:
+            return f"{metric.get('label')} 本轮没有增加（今天练够了，或已掌握）。当前 {ledger.fmt(metric)}。"
+        level, _lo, _hi = ledger.skill_level(metric)
+        return f"{metric.get('label')}：{entry['from']} → {entry['to']}（+{entry['delta']}），等级 {level}。"
+
+    def _format_proposals(self) -> str:
+        pending = self._pending_proposals()
+        if not pending:
+            return "没有待批准的提案。"
+        lines = ["📋 待批准的提案"]
+        for item in pending:
+            payload = item.get("payload") or {}
+            lines.append(f"· {item['id']}：{payload.get('label')}（{payload.get('key')}）")
+            if payload.get("cadence"):
+                lines.append(f"   提醒：{payload['cadence']}")
+            if payload.get("reason"):
+                lines.append(f"   理由：{payload['reason']}")
+        lines.append("同意用 /台账 批准 <id>，不要用 /台账 驳回 <id>。")
+        return "\n".join(lines)
+
+    def _reject_proposal(self, proposal_id: str) -> str:
+        data = self._load_proposals()
+        found = None
+        for item in data.get("items") or []:
+            if item.get("id") == proposal_id and item.get("status") == "pending":
+                item["status"] = "rejected"
+                found = item
+                break
+        if not found:
+            return f"找不到待批准的提案 {proposal_id}。"
+        self._save_proposals(data)
+        return f"已驳回提案 {proposal_id}。"
 
     def _format_list(self, show_private: bool = False) -> str:
         metrics = self._data.get("metrics") or {}

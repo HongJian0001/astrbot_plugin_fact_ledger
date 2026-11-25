@@ -34,7 +34,7 @@ def configure_timezone(name: str) -> None:
             pass
     LOCAL_TZ = timezone(timedelta(hours=8))
 
-RULES = ("decrease", "increase", "streak", "stage", "counter", "gauge", "fixed")
+RULES = ("decrease", "increase", "streak", "stage", "counter", "gauge", "fixed", "skill")
 
 RULE_LABELS = {
     "decrease": "每日递减到目标",
@@ -44,6 +44,7 @@ RULE_LABELS = {
     "counter": "累计计数",
     "gauge": "手动/事件设值",
     "fixed": "固定属性（只读，人工维护）",
+    "skill": "技能熟练度（练习累计，到 100 掌握）",
 }
 
 DEFAULT_STATE = {"version": 1, "metrics": {}}
@@ -103,6 +104,18 @@ def normalize_metric(raw: dict[str, Any]) -> dict[str, Any]:
     metric["gain_probability"] = round(max(0.0, min(1.0 - flat_p, _num(metric.get("gain_probability"), 0.0) or 0.0)), 4)
     metric["gain_step"] = abs(_num(metric.get("gain_step"), 0.0) or 0.0)
     metric["target_history"] = [item for item in (metric.get("target_history") or []) if isinstance(item, dict)]
+    metric["daily_cap"] = abs(_num(metric.get("daily_cap"), 8.0) or 8.0)
+    # gain_base=0 表示按等级自动取（生疏 5 / 入门 4 / 熟练 3 / 精通 2）
+    metric["gain_base"] = abs(_num(metric.get("gain_base"), 0.0) or 0.0)
+    metric["decay_after_days"] = max(1, _int(metric.get("decay_after_days"), 3))
+    metric["decay_per_day"] = abs(_num(metric.get("decay_per_day"), 1.0) or 1.0)
+    metric["decay_protect_level"] = abs(_num(metric.get("decay_protect_level"), 46.0) or 46.0)
+    metric["practice_count"] = max(0, _int(metric.get("practice_count"), 0))
+    metric["last_practice_on"] = str(metric.get("last_practice_on") or "")
+    metric["last_decay_on"] = str(metric.get("last_decay_on") or "")
+    metric["today_gain_date"] = str(metric.get("today_gain_date") or "")
+    metric["today_gain"] = abs(_num(metric.get("today_gain"), 0.0) or 0.0)
+    metric["mastered_at"] = str(metric.get("mastered_at") or "")
     return metric
 
 
@@ -399,6 +412,127 @@ def set_target(
     return record
 
 
+SKILL_LEVELS = (
+    (20.0, "生疏"),
+    (45.0, "入门"),
+    (70.0, "熟练"),
+    (90.0, "精通"),
+    (100.0, "掌握"),
+)
+#: 单次练习的基础增益（按次数计，越往后越慢）
+SKILL_GAIN_BY_LEVEL = {"生疏": 5.0, "入门": 4.0, "熟练": 3.0, "精通": 2.0, "掌握": 0.0}
+
+
+def skill_level(metric: dict[str, Any], value: float | None = None) -> tuple[str, float, float]:
+    """返回 (等级名, 该级下限, 该级上限)。"""
+    try:
+        current = float(metric.get("value") if value is None else value)
+    except (TypeError, ValueError):
+        current = 0.0
+    lower = 0.0
+    for upper, name in SKILL_LEVELS:
+        if current <= upper:
+            return name, lower, upper
+        lower = upper
+    return "掌握", 90.0, 100.0
+
+
+def practice(
+    metric: dict[str, Any],
+    now: datetime | None = None,
+    *,
+    sessions: int = 1,
+    reason: str = "",
+    evidence: str = "",
+    max_history: int = 30,
+) -> dict[str, Any] | None:
+    """按「次数」增加熟练度；受每日上限约束。"""
+    now = now or now_local()
+    try:
+        value = float(metric.get("value") or 0.0)
+        target = float(metric.get("target") or 100.0)
+    except (TypeError, ValueError):
+        return None
+    if value >= target:
+        return None
+    try:
+        sessions = max(1, int(sessions))
+    except (TypeError, ValueError):
+        sessions = 1
+
+    today = now.date().isoformat()
+    if metric.get("today_gain_date") != today:
+        metric["today_gain_date"] = today
+        metric["today_gain"] = 0.0
+    used = float(metric.get("today_gain") or 0.0)
+    remaining = max(0.0, float(metric.get("daily_cap") or 8.0) - used)
+    if remaining <= 0:
+        return None
+
+    level, _lo, _hi = skill_level(metric, value)
+    per = float(metric.get("gain_base") or 0.0) or SKILL_GAIN_BY_LEVEL.get(level, 4.0)
+    gain = min(per * sessions, remaining)
+    if gain <= 0:
+        return None
+    new_value = min(target, value + gain)
+    entry = _record(
+        metric, value, new_value, now,
+        reason=reason or f"练习 {sessions} 次",
+        evidence=evidence,
+        max_history=max_history,
+    )
+    metric["today_gain"] = used + (new_value - value)
+    metric["practice_count"] = int(metric.get("practice_count") or 0) + sessions
+    metric["last_practice_on"] = today
+    if new_value >= target:
+        metric["mastered_at"] = now.isoformat(timespec="seconds")
+    return entry
+
+
+def decay_if_needed(
+    metric: dict[str, Any],
+    now: datetime | None = None,
+    *,
+    max_history: int = 30,
+) -> dict[str, Any] | None:
+    """太久没练会掉熟练度；到了保护线（默认「熟练」46）就不再衰减。"""
+    if str(metric.get("rule")) != "skill":
+        return None
+    now = now or now_local()
+    try:
+        value = float(metric.get("value") or 0.0)
+    except (TypeError, ValueError):
+        return None
+    protect = float(metric.get("decay_protect_level") or 46.0)
+    if value >= protect:
+        return None
+    last = str(metric.get("last_practice_on") or "")
+    if not last:
+        return None
+    try:
+        last_date = datetime.fromisoformat(last).date()
+    except ValueError:
+        return None
+    idle = (now.date() - last_date).days
+    if idle <= int(metric.get("decay_after_days") or 3):
+        return None
+    if str(metric.get("last_decay_on") or "") == now.date().isoformat():
+        return None
+    level, low, _high = skill_level(metric, value)
+    new_value = max(low, value - float(metric.get("decay_per_day") or 1.0))
+    new_value = min(new_value, protect)
+    if new_value >= value:
+        return None
+    entry = _record(
+        metric, value, new_value, now,
+        reason=f"太久没练（{idle} 天）",
+        evidence="自动衰减",
+        max_history=max_history,
+    )
+    metric["last_decay_on"] = now.date().isoformat()
+    return entry
+
+
 def fmt(metric: dict[str, Any], value: float | None = None) -> str:
     number = metric.get("value") if value is None else value
     if isinstance(number, str):
@@ -441,6 +575,11 @@ def describe(metric: dict[str, Any]) -> str:
         if abs(delta) >= 10 ** (-int(metric.get("decimals", 1) or 0)) / 2:
             sign = "+" if delta > 0 else ""
             parts.append(f"较上次 {sign}{delta:.{int(metric.get('decimals', 1) or 0)}f}")
+    if str(metric.get("rule") or "") == "skill":
+        level, _lo, _hi = skill_level(metric)
+        parts.append(f"等级 {level}")
+        if metric.get("practice_count"):
+            parts.append(f"已练 {metric['practice_count']} 次")
     if metric.get("updated_at"):
         parts.append(f"更新于 {metric['updated_at'][:16].replace('T', ' ')}")
     if metric.get("note"):
@@ -505,6 +644,14 @@ def build_injection(metrics: dict[str, Any], *, max_metrics: int = 3, max_chars:
             lines.append(
                 f"- 她正在{direction}：当前 {fmt(item)} → 目标 {fmt(item, float(target))}。"
                 f"涉及吃、运动、身材、穿衣、累不累这类自我判断时，要参考这条，不要夸大变化。"
+            )
+            break
+    for item in items[: max(1, int(max_metrics))]:
+        if str(item.get("rule") or "") == "skill":
+            level, _lo, _hi = skill_level(item)
+            lines.append(
+                f"- 她正在练「{item.get('label')}」：熟练度 {fmt(item)}/100（{level}），已练 {item.get('practice_count') or 0} 次。"
+                f"涉及这件事时按当前水平说，不要说已经会了。"
             )
             break
     has_private = any(
