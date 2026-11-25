@@ -159,25 +159,51 @@ def save_ledger(path: str, data: dict[str, Any]) -> None:
                 pass
 
 
-def parse_cadence(text: str) -> tuple[int, int] | None:
-    """'daily@15:00' / '15:00' -> (15, 0)；其余返回 None。"""
-    value = str(text or "").strip().lower()
-    if not value:
+def parse_schedule(text: str) -> dict[str, Any] | None:
+    """解析节奏：daily@15:10 / weekly@3,20:00 / 15:10。
+
+    返回 {kind: daily|weekly, dow: 1-7|None, hour, minute}。
+    """
+    raw = str(text or "").strip().lower()
+    if not raw:
         return None
-    if "@" in value:
-        value = value.split("@", 1)[1].strip()
-    if ":" not in value:
-        value = value.replace("：", ":", 1)
-    if ":" not in value:
+    kind = "daily"
+    dow: int | None = None
+    if "@" in raw:
+        head, _, tail = raw.partition("@")
+        head = head.strip()
+        if head.startswith("weekly"):
+            kind = "weekly"
+        elif head.startswith("daily"):
+            kind = "daily"
+        raw = tail.strip()
+    if kind == "weekly" and "," in raw:
+        day_text, _, raw = raw.partition(",")
+        try:
+            dow = int(day_text)
+        except ValueError:
+            return None
+        if not (1 <= dow <= 7):
+            return None
+    raw = raw.replace("：", ":")
+    if ":" not in raw:
         return None
-    head, _, tail = value.partition(":")
+    head, _, tail = raw.partition(":")
     try:
         hour, minute = int(head), int(tail)
     except ValueError:
         return None
     if not (0 <= hour <= 23 and 0 <= minute <= 59):
         return None
-    return hour, minute
+    return {"kind": kind, "dow": dow, "hour": hour, "minute": minute}
+
+
+def parse_cadence(text: str) -> tuple[int, int] | None:
+    """兼容旧接口：只取时分。"""
+    sched = parse_schedule(text)
+    if not sched:
+        return None
+    return sched["hour"], sched["minute"]
 
 
 def is_due(metric: dict[str, Any], now: datetime | None = None) -> bool:

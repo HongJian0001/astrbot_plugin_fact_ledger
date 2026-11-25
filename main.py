@@ -675,12 +675,14 @@ class FactLedger(Star):
         for key, metric in (self._data.get("metrics") or {}).items():
             if str(metric.get("rule") or "") != "skill":
                 continue
-            slot = ledger.parse_cadence(metric.get("cadence", ""))
-            if slot is None:
+            sched = ledger.parse_schedule(metric.get("cadence", ""))
+            if sched is None:
+                continue
+            if sched["kind"] == "weekly" and sched.get("dow") and now.isoweekday() != sched["dow"]:
                 continue
             if str(metric.get("last_practice_on") or "") == today:
                 continue
-            if (now.hour, now.minute) < slot:
+            if (now.hour, now.minute) < (sched["hour"], sched["minute"]):
                 continue
             found = True
             level, _lo, _hi = ledger.skill_level(metric)
@@ -1037,6 +1039,12 @@ class FactLedger(Star):
 
     # ---------------- 指令 ----------------
 
+    @filter.command("技能进度", alias={"技能"})
+    async def cmd_skill_progress(self, event: AstrMessageEvent) -> AsyncGenerator[Any, None]:
+        """查看在练的技能、熟练度、节奏和每日上限。"""
+        self._maybe_reload_config()
+        yield event.plain_result(self._format_skill_progress())
+
     @filter.command("台账", alias={"成长台账"})
     async def cmd_ledger(self, event: AstrMessageEvent) -> AsyncGenerator[Any, None]:
         """查看/维护成长台账。"""
@@ -1161,6 +1169,65 @@ class FactLedger(Star):
             return f"找不到待批准的提案 {proposal_id}。"
         self._save_proposals(data)
         return f"已驳回提案 {proposal_id}。"
+
+    def _format_cadence(self, text: str) -> str:
+        sched = ledger.parse_schedule(text)
+        if not sched:
+            return ""
+        clock = f"{sched['hour']:02d}:{sched['minute']:02d}"
+        if sched["kind"] == "weekly":
+            names = "一二三四五六日"
+            if sched.get("dow"):
+                return f"每周{names[sched['dow'] - 1]} {clock}"
+            return f"每周 {clock}"
+        return f"每天 {clock}"
+
+    def _format_skill_progress(self) -> str:
+        metrics = {
+            key: item
+            for key, item in (self._data.get("metrics") or {}).items()
+            if str(item.get("rule") or "") == "skill"
+        }
+        if not metrics:
+            return "现在还没有在练的技能。想练的话，可以让我提一个：说「我想练 XX」"
+        now = ledger.now_local()
+        lines = ["🎯 技能进度"]
+        for key, item in metrics.items():
+            value = float(item.get("value") or 0)
+            level, _lo, hi = ledger.skill_level(item)
+            filled = int(round(value / 100 * 10))
+            bar = "█" * filled + "░" * (10 - filled)
+            lines.append("")
+            lines.append(f"· {item.get('label')}（{key}）")
+            lines.append(f"  熟练度 {ledger.fmt(item)}/100  {bar}  {level}")
+            nxt = None
+            levels = list(ledger.SKILL_LEVELS)
+            for idx, (upper, _name) in enumerate(levels):
+                if value <= upper:
+                    if idx + 1 < len(levels):
+                        nxt = (levels[idx + 1][1], levels[idx + 1][0])
+                    break
+            if nxt:
+                lines.append(f"  距「{nxt[1]}」还差 {nxt[0] - value:g} 点")
+            else:
+                lines.append("  已完全掌握")
+            lines.append(f"  已练 {item.get('practice_count') or 0} 次")
+            last = str(item.get("last_practice_on") or "")
+            if last:
+                try:
+                    days = (now.date() - ledger.datetime.fromisoformat(last).date()).days
+                    lines.append(f"  上次练习：{last}（{days} 天前）" if days else "  上次练习：今天")
+                except ValueError:
+                    lines.append(f"  上次练习：{last}")
+            else:
+                lines.append("  上次练习：还没开始")
+            cadence = self._format_cadence(item.get("cadence") or "")
+            if cadence:
+                lines.append(f"  节奏：{cadence}")
+            cap = float(item.get("daily_cap") or 8)
+            gained = float(item.get("today_gain") or 0)
+            lines.append(f"  每日上限：{cap:g} 点（今天已得 {gained:g}）")
+        return "\n".join(lines)
 
     def _format_list(self, show_private: bool = False) -> str:
         metrics = self._data.get("metrics") or {}
