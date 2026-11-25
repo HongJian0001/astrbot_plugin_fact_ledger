@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import sys
@@ -1186,6 +1187,9 @@ class FactLedger(Star):
             yield event.plain_result("只有管理员能改台账。查看用 /台账。")
             return
 
+        if sub in ("新建技能", "加技能") and args:
+            yield event.plain_result(await self._create_skill(args[0], args[1] if len(args) > 1 else ""))
+            return
         if sub == "练习" and args:
             sessions = 1
             if len(args) > 1:
@@ -1224,6 +1228,7 @@ class FactLedger(Star):
                 "/台账                     查看全部\n"
                 "/台账 详情 <key>          看变化与证据\n"
                 "/台账 目标 <key> <数值> [YYYY-MM-DD]\n"
+                "/台账 新建技能 <名称> [频率参考]\n"
                 "/台账 练习 <key> [次数] [说明]\n"
                 "/台账 频率 <key> <自由文本>\n"
                 "/台账 提案 / 批准 [id] / 驳回 <id>\n"
@@ -1232,6 +1237,30 @@ class FactLedger(Star):
                 "/台账 加 <key> <名称> <单位> <初值> <目标> <规则> <步长> [daily@15:00]\n"
                 "/台账 删 <key>"
             )
+
+    async def _create_skill(self, label: str, frequency: str = "") -> str:
+        """用户友好入口：只给名字（可选频率），自动生成 key。"""
+        label = str(label or "").strip()
+        if not label:
+            return "技能名称不能为空，例如：/台账 新建技能 穿高跟鞋走路"
+        key = "skill_" + hashlib.md5(label.encode("utf-8")).hexdigest()[:6]
+        metrics = self._data.setdefault("metrics", {})
+        if key in metrics:
+            return f"已经有这个技能了：{metrics[key].get('label')}（{key}）"
+        metric = ledger.new_metric(
+            key, label, unit="", value=0, target=100, rule="skill",
+            cadence="", decimals=0, priority=70,
+            frequency_hint=str(frequency or "").strip(),
+        )
+        metric["last_practice_on"] = ""
+        async with self._lock:
+            metrics[key] = metric
+            self._save()
+        await self._write_skill_memory(key, metric, "approved")
+        text = f"已创建技能「{label}」，当前 0/100（生疏），key 是 {key}。"
+        if metric.get("frequency_hint"):
+            text += f"频率参考：{metric['frequency_hint']}。"
+        return text + "跟我说练了就会自动记。"
 
     async def _apply_frequency(self, key: str, frequency: str) -> str:
         metric = (self._data.get("metrics") or {}).get(key)
