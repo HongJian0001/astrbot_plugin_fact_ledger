@@ -83,6 +83,9 @@ LEDGER_RULES = (
     "**数值类以 fact_ledger 为准**（与记忆或旧对话冲突时用台账，不得编造新数字）。"
     "两者优先级都与人设同级，但各管各的，不要互相覆盖。"
     "她的行为与情绪也要参考这些数据（例如减肥期的饮食、运动、穿衣、疲惫感），但不要向用户播报台账结构。"
+    "如果这一轮对话里她**真的完成了技能练习**（她自己描述做完了，或主人确认她做了），"
+    "调用 fact_ledger_practice 记一次；只提到、计划、假设、回忆都不算。"
+    "她说「我练了」但没细说也算一次。同一轮最多记一次。"
     "</fact_ledger_rules>"
 )
 
@@ -97,6 +100,7 @@ class FactLedger(Star):
         self._data = ledger.load_ledger(self.ledger_path)
         self._synced: dict[str, tuple] = {}
         self._warned: set[str] = set()
+        self._practice_turns: dict[str, str] = {}
         ledger.configure_timezone(str(self._cfg("timezone", "Asia/Shanghai")))
         self._config_path = os.path.join(str(get_astrbot_data_path()), "config", f"{PLUGIN_NAME}_config.json")
         self._config_mtime = 0.0
@@ -167,6 +171,114 @@ class FactLedger(Star):
             return
         self._warned.add(message)
         logger.warning(f"{LOG} {message}")
+
+    def _memory_bridge(self) -> Any:
+        try:
+            stars = list(self.context.get_all_stars() or [])
+        except Exception:
+            stars = []
+        for meta in stars:
+            names = {str(getattr(meta, attr, "") or "") for attr in ("name", "display_name", "root_dir_name")}
+            if not any("memory_companion" in name for name in names):
+                continue
+            module = getattr(meta, "module", None)
+            if module is None:
+                star_cls = getattr(meta, "star_cls", None)
+                module = sys.modules.get(getattr(star_cls, "__module__", "")) if star_cls else None
+            factory = getattr(module, "get_memory_companion_bridge", None)
+            if not callable(factory):
+                continue
+            try:
+                bridge = factory()
+            except Exception:
+                continue
+            if bridge is not None:
+                return bridge
+        return None
+
+    async def _write_skill_memory(self, key: str, metric: dict[str, Any], phase: str) -> None:
+        """技能里程碑写入长期记忆：approved / proficient / mastered。"""
+        if not bool(self._cfg("skill_memory_enabled", True)):
+            return
+        uid = str(self._cfg("memory_sync_target_id", "") or "").strip()
+        if not uid:
+            return
+        bridge = self._memory_bridge()
+        if bridge is None:
+            self._warn_once("找不到 memory_companion 桥接，技能里程碑未写入记忆")
+            return
+        label = metric.get("label") or key
+        level, _lo, _hi = ledger.skill_level(metric)
+        if phase == "approved":
+            content = f"我决定练「{label}」，目标是完全掌握。当前熟练度 {ledger.fmt(metric)}/100（{level}）。"
+            importance = 0.7
+        elif phase == "proficient":
+            content = f"「{label}」的熟练度到 {ledger.fmt(metric)} 了，已经算熟练，穿高跟鞋走路不慌了。"
+            importance = 0.8
+        elif phase == "mastered":
+            content = f"我已经完全掌握「{label}」了，熟练度 100，这件事变成了我自己的技能。"
+            importance = 0.9
+        else:
+            return
+        try:
+            await bridge.record_external_memory(
+                user_id=uid,
+                content=content,
+                source_plugin=PLUGIN_NAME,
+                idempotency_key=f"fact_ledger:skill:{key}:{phase}",
+                importance=importance,
+                tags=["skill", "growth", key],
+            )
+            logger.info(f"{LOG} 技能记忆已写入：{key}/{phase}")
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(f"{LOG} 技能记忆写入失败: {exc}")
+
+    def _turn_id(self, event: AstrMessageEvent) -> str:
+        obj = getattr(event, "message_obj", None)
+        return str(getattr(obj, "message_id", "") or "")
+
+    async def _record_practice(
+        self, event: AstrMessageEvent, key: str, sessions: int, note: str
+    ) -> tuple[str, dict[str, Any] | None]:
+        """统一入口：每轮去重 + 每日上限 + 里程碑记忆。"""
+        metric = (self._data.get("metrics") or {}).get(key)
+        if not metric:
+            return f"没有名为 {key} 的技能。", None
+        if str(metric.get("rule")) != "skill":
+            return f"{metric.get('label')} 不是技能指标。", None
+        turn = self._turn_id(event)
+        if turn and self._practice_turns.get(key) == turn:
+            return f"这一轮已经给「{metric.get('label')}」记过一次了。", None
+        old_value = float(metric.get("value") or 0.0)
+        async with self._lock:
+            entry = ledger.practice(
+                metric, sessions=sessions,
+                reason=note or f"练习 {sessions} 次（没细说）",
+                evidence=f"{ledger.now_local():%Y-%m-%d %H:%M} 对话记录",
+                max_history=self._history_max,
+            )
+            if entry:
+                self._save()
+        if not entry:
+            level, _lo, _hi = ledger.skill_level(metric)
+            return (
+                f"{metric.get('label')} 本轮没有增加（今天练够了，或已经掌握）。当前 {ledger.fmt(metric)}，{level}。",
+                None,
+            )
+        if turn:
+            self._practice_turns[key] = turn
+        await self._sync_changed()
+        new_value = float(metric.get("value") or 0.0)
+        if old_value < 46.0 <= new_value:
+            await self._write_skill_memory(key, metric, "proficient")
+        if old_value < 100.0 <= new_value:
+            await self._write_skill_memory(key, metric, "mastered")
+        level, _lo, _hi = ledger.skill_level(metric)
+        return (
+            f"{metric.get('label')} 熟练度 {entry['from']} → {entry['to']}"
+            f"（+{entry['delta']}），当前等级 {level}，已练 {metric.get('practice_count')} 次。",
+            entry,
+        )
 
     def _save(self) -> None:
         """落盘台账并把最新值回写到插件配置页。"""
@@ -804,6 +916,9 @@ class FactLedger(Star):
     async def tool_practice(self, event: AstrMessageEvent, key: str, sessions: int = 1, note: str = "") -> str:
         """记录一次技能练习，增加熟练度（按次数，受每日上限约束）。
 
+        只要这一轮对话里她真的练了就要调用：她自己描述做完了，或主人确认她做了。
+        只提到、计划、假设、回忆都不算；她说「我练了」但没细说也算一次。
+
         Args:
             key (string): 技能指标键名，例如 skill_highheels。
             sessions (number): 练习次数，默认 1。
@@ -811,30 +926,8 @@ class FactLedger(Star):
         """
         if not self._can_read_private(event):
             return "这个只能由主人私聊我时做。"
-        metric = (self._data.get("metrics") or {}).get(str(key or "").strip())
-        if not metric:
-            return f"没有名为 {key} 的技能。"
-        if str(metric.get("rule")) != "skill":
-            return f"{metric.get('label')} 不是技能指标，不能用练习。"
-        async with self._lock:
-            entry = ledger.practice(
-                metric,
-                sessions=sessions,
-                reason=note or f"练习 {sessions} 次",
-                evidence=f"{ledger.now_local():%Y-%m-%d %H:%M} 对话记录",
-                max_history=self._history_max,
-            )
-            if entry:
-                self._save()
-        if not entry:
-            level, _lo, _hi = ledger.skill_level(metric)
-            return f"{metric.get('label')} 本轮没有增加（可能今天练够了，或已经掌握）。当前 {ledger.fmt(metric)}，{level}。"
-        await self._sync_changed()
-        level, _lo, _hi = ledger.skill_level(metric)
-        return (
-            f"{metric.get('label')} 熟练度 {entry['from']} → {entry['to']}"
-            f"（+{entry['delta']}），当前等级 {level}，已练 {metric.get('practice_count')} 次。"
-        )
+        text, _entry = await self._record_practice(event, str(key or "").strip(), sessions, note)
+        return text
 
     @filter.llm_tool(name="fact_task_propose")
     async def tool_propose(self, event: AstrMessageEvent, key: str, label: str, cadence: str = "", reason: str = "") -> str:
@@ -937,7 +1030,8 @@ class FactLedger(Star):
             if item.get("id") == target.get("id"):
                 item["status"] = "approved"
         self._save_proposals(data)
-        return f"已批准：把「{label}」加进台账，当前熟练度 0/100（生疏）。说「练了一次」我就给你记上。"
+        await self._write_skill_memory(key, metric, "approved")
+        return f"已批准：把「{label}」加进台账，当前熟练度 0/100（生疏）。以后你练了我就自动记上。"
 
     # ---------------- 指令 ----------------
 
@@ -1019,6 +1113,7 @@ class FactLedger(Star):
             return f"没有名为 {key} 的技能。"
         if str(metric.get("rule")) != "skill":
             return f"{metric.get('label')} 不是技能指标。"
+        old_value = float(metric.get("value") or 0.0)
         async with self._lock:
             entry = ledger.practice(
                 metric, sessions=sessions,
@@ -1030,6 +1125,10 @@ class FactLedger(Star):
                 self._save()
         if not entry:
             return f"{metric.get('label')} 本轮没有增加（今天练够了，或已掌握）。当前 {ledger.fmt(metric)}。"
+        if old_value < 46.0 <= float(metric.get("value") or 0.0):
+            await self._write_skill_memory(key, metric, "proficient")
+        if old_value < 100.0 <= float(metric.get("value") or 0.0):
+            await self._write_skill_memory(key, metric, "mastered")
         level, _lo, _hi = ledger.skill_level(metric)
         return f"{metric.get('label')}：{entry['from']} → {entry['to']}（+{entry['delta']}），等级 {level}。"
 

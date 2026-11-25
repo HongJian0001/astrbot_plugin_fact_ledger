@@ -287,5 +287,11 @@
     "hint": "台账为空时自动加一个「示例·读书进度」，方便先看到效果；不需要可关掉并删掉该指标。",
     "type": "bool",
     "default": true
+  },
+  "skill_memory_enabled": {
+    "description": "技能里程碑写入长期记忆",
+    "hint": "批准新技能、升到「熟练」、练到「掌握」时，各写一条长期记忆。",
+    "type": "bool",
+    "default": true
   }
 }
