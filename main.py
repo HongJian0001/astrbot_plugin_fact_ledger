@@ -88,6 +88,10 @@ LEDGER_RULES = (
     "主人让她练、她确认做了（「你去练一下」→「我走完了」）→ 记一次；"
     "主人说他自己做了（「我今天穿高跟鞋走了半小时」）→ 那是主人的经历，**不算她的练习，不要记**。"
     "只提到、计划、假设、回忆都不算；她说「我练了」但没细说也算一次。同一轮最多记一次。"
+    "**记完必须说出来**：调用 fact_ledger_practice 成功后，要用一句话自然告诉主人"
+    "（练了什么、熟练度从多少到多少、离下一级还差多少），不能只调工具不吭声。"
+    "**改频率**：主人明确要求（「改成每周五次」）就直接调用 fact_ledger_set_frequency，不要提提案——主人的指令本身就是同意；"
+    "只有她自己想改时，才调用 fact_task_propose_frequency 提提案，等主人同意。"
     "</fact_ledger_rules>"
 )
 
@@ -252,6 +256,7 @@ class FactLedger(Star):
         if turn and self._practice_turns.get(key) == turn:
             return f"这一轮已经给「{metric.get('label')}」记过一次了。", None
         old_value = float(metric.get("value") or 0.0)
+        old_level, _lo, _hi = ledger.skill_level(metric, old_value)
         async with self._lock:
             entry = ledger.practice(
                 metric, sessions=sessions,
@@ -276,11 +281,24 @@ class FactLedger(Star):
         if old_value < 100.0 <= new_value:
             await self._write_skill_memory(key, metric, "mastered")
         level, _lo, _hi = ledger.skill_level(metric)
-        return (
-            f"{metric.get('label')} 熟练度 {entry['from']} → {entry['to']}"
-            f"（+{entry['delta']}），当前等级 {level}，已练 {metric.get('practice_count')} 次。",
-            entry,
+        current = float(metric.get("value") or 0.0)
+        nxt = None
+        levels = list(ledger.SKILL_LEVELS)
+        for idx, (upper, _name) in enumerate(levels):
+            if current <= upper and idx + 1 < len(levels):
+                nxt = (levels[idx + 1][0], levels[idx + 1][1])
+                break
+        text = (
+            f"{metric.get('label')} 熟练度 {float(entry['from']):g} → {float(entry['to']):g}"
+            f"（+{float(entry['delta']):g}），当前等级 {level}，已练 {metric.get('practice_count')} 次"
         )
+        if nxt:
+            text += f"，距「{nxt[1]}」还差 {nxt[0] - current:g} 点"
+        text += "。"
+        if level != old_level:
+            text += f"（升级：{old_level} → {level}）"
+        text += " —— 记得用一句话告诉主人这次练习的结果和感受。"
+        return text, entry
 
     def _save(self) -> None:
         """落盘台账并把最新值回写到插件配置页。"""
@@ -1236,6 +1254,7 @@ class FactLedger(Star):
         if str(metric.get("rule")) != "skill":
             return f"{metric.get('label')} 不是技能指标。"
         old_value = float(metric.get("value") or 0.0)
+        old_level, _lo, _hi = ledger.skill_level(metric, old_value)
         async with self._lock:
             entry = ledger.practice(
                 metric, sessions=sessions,
@@ -1252,7 +1271,10 @@ class FactLedger(Star):
         if old_value < 100.0 <= float(metric.get("value") or 0.0):
             await self._write_skill_memory(key, metric, "mastered")
         level, _lo, _hi = ledger.skill_level(metric)
-        return f"{metric.get('label')}：{entry['from']} → {entry['to']}（+{entry['delta']}），等级 {level}。"
+        return (
+            f"{metric.get('label')}：{float(entry['from']):g} → {float(entry['to']):g}"
+            f"（+{float(entry['delta']):g}），等级 {level}。"
+        )
 
     def _format_proposals(self) -> str:
         pending = self._pending_proposals()
