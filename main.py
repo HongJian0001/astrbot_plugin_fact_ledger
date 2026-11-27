@@ -432,6 +432,7 @@ class FactLedger(Star):
             self._applied.update(values)
             return
         self._apply_config_values(diff, record=True)
+        self._apply_skill_daily_cap()
         self._applied = self._config_values()
 
     # ---------------- 基础 ----------------
@@ -981,6 +982,26 @@ class FactLedger(Star):
             f"哥哥同意的话回我「同意」，或者说 /台账 批准 {proposal['id']}。"
         )
 
+    def _skill_cap(self) -> float:
+        try:
+            value = float(self._cfg("skill_daily_cap", 8) or 8)
+        except (TypeError, ValueError):
+            value = 8.0
+        return max(1.0, min(100.0, value))
+
+    def _apply_skill_daily_cap(self) -> None:
+        """把配置页的「技能每日上限」应用到所有技能指标。"""
+        cap = self._skill_cap()
+        changed = False
+        for metric in (self._data.get("metrics") or {}).values():
+            if str(metric.get("rule")) != "skill":
+                continue
+            if float(metric.get("daily_cap") or 0) != cap:
+                metric["daily_cap"] = cap
+                changed = True
+        if changed:
+            self._save()
+
     def _proposal_quota_error(self) -> str:
         pending = self._pending_proposals()
         if len(pending) >= 3:
@@ -1139,6 +1160,7 @@ class FactLedger(Star):
             frequency_hint=str(payload.get("frequency") or ""),
         )
         metric["last_practice_on"] = ""
+        metric["daily_cap"] = self._skill_cap()
         async with self._lock:
             self._data.setdefault("metrics", {})[key] = metric
             self._save()
@@ -1253,6 +1275,7 @@ class FactLedger(Star):
             frequency_hint=str(frequency or "").strip(),
         )
         metric["last_practice_on"] = ""
+        metric["daily_cap"] = self._skill_cap()
         async with self._lock:
             metrics[key] = metric
             self._save()
