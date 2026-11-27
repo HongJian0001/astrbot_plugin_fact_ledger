@@ -977,10 +977,19 @@ class FactLedger(Star):
         data = self._load_proposals()
         data["items"].append(proposal)
         self._save_proposals(data)
-        return (
-            f"已生成提案 {proposal['id']}：把「{label}」加进台账（目标 100，按次数累计）。"
-            f"哥哥同意的话回我「同意」，或者说 /台账 批准 {proposal['id']}。"
-        )
+        freq = str(frequency or "").strip()
+        lines = [
+            "提案已经写好了，等你点头（状态：待批准）",
+            f"· 技能：{label}",
+            "· 目标：熟练度 100（掌握）",
+            f"· 累计方式：按练习次数，每日上限 {self._skill_cap():g} 点",
+        ]
+        if freq:
+            lines.append(f"· 频率参考：{freq}（只是参考，不打卡）")
+        if reason:
+            lines.append(f"· 理由：{reason}")
+        lines.append("同意的话回我「同意」就行。")
+        return "\n".join(lines)
 
     def _skill_cap(self) -> float:
         try:
@@ -1086,10 +1095,16 @@ class FactLedger(Star):
             "frequency": frequency,
             "reason": str(reason or ""),
         })
-        return (
-            f"已生成提案 {proposal['id']}：把「{metric.get('label')}」的练习频率改成「{frequency}」。"
-            f"哥哥同意的话回我「同意」，或者说 /台账 批准 {proposal['id']}。"
-        )
+        current = str(metric.get("frequency_hint") or "未设")
+        lines = [
+            "想调一下练习频率，等你点头（状态：待批准）",
+            f"· 技能：{metric.get('label')}",
+            f"· 频率：{current} → {frequency}",
+        ]
+        if reason:
+            lines.append(f"· 理由：{reason}")
+        lines.append("同意的话回我「同意」就行。")
+        return "\n".join(lines)
 
     @filter.llm_tool(name="fact_task_approve")
     async def tool_approve(self, event: AstrMessageEvent, proposal_id: str = "") -> str:
@@ -1335,18 +1350,29 @@ class FactLedger(Star):
         pending = self._pending_proposals()
         if not pending:
             return "没有待批准的提案。"
-        lines = ["📋 待批准的提案"]
-        for item in pending:
+        lines = [f"📋 待批准 {len(pending)} 个"]
+        for idx, item in enumerate(pending, 1):
             payload = item.get("payload") or {}
             if str(item.get("type")) == "skill_frequency":
-                lines.append(f"· {item['id']}：把「{payload.get('key')}」的频率改成「{payload.get('frequency')}」")
+                key = str(payload.get("key") or "")
+                label = ((self._data.get("metrics") or {}).get(key) or {}).get("label") or key
+                lines.append("")
+                lines.append(f"{idx}. {label} · 调整练习频率")
+                lines.append("   状态：待批准")
+                lines.append(f"   变更：{payload.get('frequency')}")
             else:
-                lines.append(f"· {item['id']}：{payload.get('label')}（{payload.get('key')}）")
-            if payload.get("frequency"):
-                lines.append(f"   频率参考：{payload['frequency']}（不打卡）")
+                lines.append("")
+                lines.append(f"{idx}. {payload.get('label')}（新技能）")
+                lines.append("   状态：待批准")
+                lines.append("   目标：熟练度 100（掌握）")
+                lines.append(f"   累计：按次数，每日上限 {self._skill_cap():g} 点")
+                if payload.get("frequency"):
+                    lines.append(f"   频率参考：{payload['frequency']}（不打卡）")
             if payload.get("reason"):
                 lines.append(f"   理由：{payload['reason']}")
-        lines.append("同意用 /台账 批准 <id>，不要用 /台账 驳回 <id>。")
+            lines.append(f"   编号：{item['id']}（批准/驳回时才用）")
+        lines.append("")
+        lines.append("/台账 批准 [编号]      /台账 驳回 <编号>")
         return "\n".join(lines)
 
     def _reject_proposal(self, proposal_id: str) -> str:
