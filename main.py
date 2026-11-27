@@ -430,6 +430,7 @@ class FactLedger(Star):
         diff = {key: value for key, value in values.items() if self._applied.get(key) != value}
         if not diff:
             self._applied.update(values)
+            self._apply_skill_daily_cap()
             return
         self._apply_config_values(diff, record=True)
         self._apply_skill_daily_cap()
@@ -456,6 +457,7 @@ class FactLedger(Star):
             async with self._lock:
                 if not os.path.exists(self.ledger_path):
                     self._save()
+                self._apply_skill_daily_cap()
             logger.info(f"{LOG} 已加载，指标 {len(self._data.get('metrics') or {})} 个")
         except Exception as exc:  # noqa: BLE001
             logger.warning(f"{LOG} 初始化失败: {exc}")
